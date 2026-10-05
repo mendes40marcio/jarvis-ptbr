@@ -590,6 +590,9 @@ class JarvisLive:
         self._is_speaking         = False
         self._speaking_lock       = threading.Lock()
         self._phone_active        = False   # True while phone mic is streaming; pauses PC mic
+        # Trilha de abertura: o player e até quando o microfone fica em espera.
+        self._intro_music         = None
+        self._intro_hold_until    = 0.0
         self._pending_vision       = None    # (img_bytes, mime_type, question, angle) to inject after tool response
         self._vision_cam_active    = False   # True if camera was opened for vision → auto-close after response
         self._vision_close_pending = False   # True after vision injected; next turn_complete closes camera
@@ -1443,7 +1446,8 @@ class JarvisLive:
             if self._ptt_enabled and not self._ptt_held:
                 return
             
-            if not self.ui.muted and not self._phone_active:
+            if (not self.ui.muted and not self._phone_active
+                    and time.monotonic() >= self._intro_hold_until):
                 data = indata.tobytes()
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
@@ -1820,6 +1824,69 @@ class JarvisLive:
 
     # ── Morning briefing ────────────────────────────────────────────────────────
 
+    async def _start_intro_music(self) -> None:
+        """Começa a trilha de abertura em volume baixo. Qualquer falha aqui
+        (sem mpv, sem música) só deixa a abertura sem trilha."""
+        try:
+            from core.intro_music import IntroMusic, VOLUME, FADE_IN, MAX_SECONDS
+            m = IntroMusic()
+            if not m.start():
+                return
+            self._intro_music = m
+            # Microfone em espera enquanto a música toca. O prazo garante que
+            # ele volta sozinho mesmo se o encerramento nunca acontecer.
+            self._intro_hold_until = time.monotonic() + MAX_SECONDS
+            self.ui.write_log("SYS: Trilha de abertura tocando — o microfone "
+                              "volta ao fim do resumo.")
+            # A música entra primeiro, sozinha e um pouco mais alta; depois
+            # baixa para o volume de fundo e só então o JARVIS começa a falar.
+            from core import intro_music as _im
+            lead     = float(getattr(_im, "LEAD_SECONDS", 0) or 0)
+            lead_vol = getattr(_im, "LEAD_VOLUME", VOLUME)
+            asyncio.create_task(m.fade(0, lead_vol if lead else VOLUME, FADE_IN))
+            if lead:
+                await asyncio.sleep(lead)
+                asyncio.create_task(m.fade(lead_vol, VOLUME, 1.5))
+        except Exception as e:
+            print(f"[Intro] Trilha de abertura falhou: {e!r}")
+
+    async def _finish_intro_music(self) -> None:
+        """Espera o JARVIS terminar de falar o resumo, some com a música aos
+        poucos e libera o microfone."""
+        m = self._intro_music
+        if m is None:
+            return
+        self._intro_music = None
+        try:
+            from core.intro_music import FADE_OUT
+            # 1) espera ele começar a falar a fase 2 (até 15 s)
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 15:
+                with self._speaking_lock:
+                    if self._is_speaking:
+                        break
+                await asyncio.sleep(0.2)
+            # 2) espera 1,5 s seguidos de silêncio (até 90 s)
+            quiet_since = None
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 90:
+                with self._speaking_lock:
+                    speaking = self._is_speaking
+                if speaking or self._tail_active():
+                    quiet_since = None
+                else:
+                    quiet_since = quiet_since or time.monotonic()
+                    if time.monotonic() - quiet_since >= 1.5:
+                        break
+                await asyncio.sleep(0.2)
+            await m.fade(m.volume, 0, FADE_OUT)
+        except Exception as e:
+            print(f"[Intro] Erro ao encerrar a trilha: {e!r}")
+        finally:
+            m.stop()
+            self._intro_hold_until = 0.0
+            self.ui.write_log("SYS: Fim da trilha de abertura — microfone liberado.")
+
     async def _send_startup_briefing(self) -> None:
         """
         Two-phase briefing optimized for speed:
@@ -1881,6 +1948,9 @@ class JarvisLive:
         await asyncio.sleep(0.3)
         if not self.session:
             return
+
+        # ── Trilha de abertura ───────────────────────────────────────────────
+        await self._start_intro_music()
 
         # ── Phase 1: instant greeting ─────────────────────────────────────────
         # The briefing fires before the user has said anything, so the
@@ -2031,7 +2101,13 @@ class JarvisLive:
                 print(f"[JARVIS] Briefing phase 2 failed: {e}")
                 self.ui.write_log("SYS: Could not fetch the news for the briefing.")
 
-        asyncio.create_task(_deliver_news())
+        async def _news_then_outro():
+            try:
+                await _deliver_news()
+            finally:
+                await self._finish_intro_music()
+
+        asyncio.create_task(_news_then_outro())
 
     # ── Session memory ──────────────────────────────────────────────────────────
 
