@@ -512,6 +512,29 @@ class _ReconnectSignal(Exception):
         self.keep_context = keep_context
 
 
+def _leaf_text(exc: BaseException) -> str:
+    """Mensagens das exceções reais, desembrulhando o grupo do TaskGroup.
+
+    str() de um ExceptionGroup é só "unhandled errors in a TaskGroup (...)" —
+    a palavra "unhandled" contém "handle", e era isso que fazia QUALQUER queda
+    parecer um handle de retomada rejeitado."""
+    if isinstance(exc, BaseExceptionGroup):
+        return " | ".join(_leaf_text(sub) for sub in exc.exceptions)
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _duration_secs(value, default: float = 10.0) -> float:
+    """time_left do GoAway em segundos (aceita timedelta, '50s' ou número)."""
+    if value is None:
+        return default
+    try:
+        if hasattr(value, "total_seconds"):
+            return float(value.total_seconds())
+        return float(str(value).strip().rstrip("s"))
+    except Exception:
+        return default
+
+
 def _is_reconnect_signal(exc: BaseException) -> bool:
     """True if `exc` is a _ReconnectSignal, or a(n) (Base)ExceptionGroup that
     wraps one — TaskGroup bundles child exceptions into a group."""
@@ -600,6 +623,10 @@ class JarvisLive:
         # "yesterday we talked about…" line silently disappears.
         self._resume_handle: str | None = None
         self._turn_done_event: asyncio.Event | None = None
+        # GoAway: aviso do servidor de que vai encerrar a conexão. Tratado em
+        # _watch_goaway, que reconecta com o handle ANTES do corte forçado.
+        self._goaway_event: asyncio.Event | None = None
+        self._goaway_secs  = 10.0
         self._dashboard     = None
         self._briefing_sent    = False          # morning briefing fires once per process
         self._sys_monitor      = SystemMonitor()  # persistent cooldown state
@@ -822,6 +849,31 @@ class JarvisLive:
             + ("..." if keep else " (starting a fresh conversation)...")
         )
         raise _ReconnectSignal(keep_context=keep)
+
+    async def _watch_goaway(self):
+        """Tarefa da sessão: quando chega o GoAway, espera um momento tranquilo
+        (JARVIS calado, sem áudio na fila, sem visão em andamento, você sem
+        falar) e reconstrói a sessão com o handle de retomada, antes que o
+        servidor derrube a conexão com o erro 1008."""
+        assert self._goaway_event is not None
+        await self._goaway_event.wait()
+        # Margem de 3 s antes do prazo do servidor.
+        deadline = time.monotonic() + max(1.0, self._goaway_secs - 3.0)
+        while time.monotonic() < deadline:
+            with self._speaking_lock:
+                speaking = self._is_speaking
+            busy = (
+                speaking
+                or (self.audio_in_queue is not None and not self.audio_in_queue.empty())
+                or self._vision_busy
+                or (time.monotonic() - self._last_user_speech) < 1.5
+            )
+            if not busy:
+                break
+            await asyncio.sleep(0.2)
+        print("[JARVIS] 🔁 Renovando a sessão (GoAway) — conversa mantida")
+        self.ui.write_log("SYS: Renovando a sessão com o Gemini...")
+        raise _ReconnectSignal(keep_context=True)
 
     def _make_remote_key(self):
         """Called from Qt main thread when user presses Remote Control."""
@@ -1489,6 +1541,18 @@ class JarvisLive:
                             if self._resume_handle is None:
                                 print("[JARVIS] 🔗 Session resumption armed")
                             self._resume_handle = _sru.new_handle
+
+                    # ── GoAway ───────────────────────────────────────────────
+                    # O servidor avisa que vai encerrar. Antes isso era
+                    # ignorado e a conexão caía à força (erro 1008).
+                    _ga = getattr(response, "go_away", None)
+                    if (_ga is not None and self._goaway_event is not None
+                            and not self._goaway_event.is_set()):
+                        self._goaway_secs = _duration_secs(
+                            getattr(_ga, "time_left", None))
+                        print(f"[JARVIS] ⏳ GoAway recebido — a sessão encerra "
+                              f"em ~{self._goaway_secs:.0f}s")
+                        self._goaway_event.set()
 
                     if response.data:
                         if self._interrupted:
@@ -2160,6 +2224,9 @@ class JarvisLive:
                     self._vision_last_time     = 0.0
                     self._interrupted          = False
 
+                    self._goaway_event = asyncio.Event()
+                    self._goaway_secs  = 10.0
+
                     print("[JARVIS] Connected.")
                     if _resumed_with:
                         # Say it plainly: the difference between "it reconnected"
@@ -2184,6 +2251,7 @@ class JarvisLive:
 
                     self._reconnect_event.clear()  # ignore requests from before this session
                     tg.create_task(self._watch_reconnect())
+                    tg.create_task(self._watch_goaway())
                     tg.create_task(self._send_realtime())
                     tg.create_task(self._listen_audio())
                     tg.create_task(self._receive_audio())
@@ -2229,11 +2297,23 @@ class JarvisLive:
                 # assistant would never come back at all: the feature meant to
                 # survive a reconnect would be the thing preventing one. Drop it
                 # once and let the next attempt start clean.
+                _leaf = _leaf_text(e)
+
+                # Rede de segurança: o GoAway chegou num momento em que não deu
+                # para renovar a tempo (ex.: ferramenta demorada) e o servidor
+                # cortou. Foi só tempo de sessão — o handle continua válido,
+                # então a conversa é retomada em vez de jogada fora.
+                if "goaway" in _leaf.lower().replace(" ", "") and self._resume_handle:
+                    print("[JARVIS] 🔁 Sessão encerrada pelo GoAway — retomando a conversa")
+                    self._conn_backoff = 0
+                    await asyncio.sleep(1)
+                    continue
+
                 if _resumed_with and (
-                    "resum" in str(e).lower()
-                    or "handle" in str(e).lower()
-                    or "INVALID_ARGUMENT" in str(e)
-                    or "NOT_FOUND" in str(e)
+                    "resum" in _leaf.lower()
+                    or "handle" in _leaf.lower()
+                    or "INVALID_ARGUMENT" in _leaf
+                    or "NOT_FOUND" in _leaf
                 ):
                     print("[JARVIS] 🔗 Resumption handle rejected — starting a fresh session")
                     self.ui.write_log("SYS: Could not restore the conversation — starting fresh.")
