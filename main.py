@@ -1852,6 +1852,11 @@ class JarvisLive:
 
         news_future = loop.run_in_executor(None, _briefing_news)
 
+        # Clima e mercado gamer, buscados em paralelo com as de tecnologia.
+        from core import briefing_extras as _bx
+        weather_future = loop.run_in_executor(None, _bx.fetch_weather)
+        games_future   = loop.run_in_executor(None, _bx.fetch_games_news)
+
         await asyncio.sleep(0.3)
         if not self.session:
             return
@@ -1879,7 +1884,7 @@ class JarvisLive:
             )
 
         p1 = (
-            f"Greet the user warmly, mention it is {time_str} ({_period}), and say you are fetching today's news now.{session_clause} "
+            f"Greet the user warmly, mention it is {time_str} ({_period}), and say you are checking the weather and today's news now.{session_clause} "
             f"Keep it to 2 short sentences max. Do not call any tools.{lang_clause}{name_clause}"
         )
 
@@ -1948,6 +1953,51 @@ class JarvisLive:
                     p2 = (
                         "News headlines could not be fetched right now. "
                         f"Let the user know briefly.{lang_str}"
+                    )
+
+                # ── Clima + mercado gamer ───────────────────────────────
+                # Se algum falhar, a abertura segue só com o que veio.
+                async def _extra(fut, nome):
+                    try:
+                        return await asyncio.wait_for(
+                            asyncio.wrap_future(fut), timeout=6.0) or ""
+                    except Exception as e:
+                        print(f"[Briefing] {nome} falhou: {e!r}")
+                        return ""
+
+                weather_text = await _extra(weather_future, "Clima")
+                games_text   = await _extra(games_future, "Notícias de games")
+
+                if weather_text or games_text:
+                    painel = []
+                    if weather_text:
+                        painel.append(weather_text)
+                    if not failed:
+                        painel.append("TECNOLOGIA E IA\n" + news_text)
+                    if games_text:
+                        painel.append("MERCADO GAMER\n" + games_text)
+                    self.ui.show_content("BRIEFING — clima, tecnologia e games",
+                                         "\n\n".join(painel))
+
+                    roteiro = []
+                    if weather_text:
+                        roteiro.append(f"- Weather, first, in one sentence: {weather_text}")
+                    if not failed:
+                        roteiro.append(
+                            "- Tech: pick ONE of these headlines and summarise it "
+                            "in one sentence:\n" + news_text)
+                    else:
+                        roteiro.append("- Tech news could not be fetched; say so in a few words.")
+                    if games_text:
+                        roteiro.append(
+                            "- Gaming market: pick ONE of these headlines, preferably "
+                            "about the games industry or market, and summarise it in "
+                            "one sentence:\n" + games_text)
+                    p2 = (
+                        "[BRIEFING] Deliver a short briefing in this order, one "
+                        "sentence per item:\n" + "\n".join(roteiro)
+                        + "\nThen say the full lists are on screen. Keep it natural "
+                        f"and brief. Do not call any tools.{lang_str}"
                     )
 
                 await self.session.send_client_content(
