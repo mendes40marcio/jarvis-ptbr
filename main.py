@@ -512,6 +512,27 @@ class _ReconnectSignal(Exception):
         self.keep_context = keep_context
 
 
+# Idioma(s) em que a sua voz é transcrita. Vazio = detecção automática.
+TRANSCRIPTION_LANGUAGES = ["pt-BR"]
+
+
+def _input_transcription_config():
+    """Configuração da transcrição da voz do usuário.
+
+    Fixar o idioma evita frases em português saindo transcritas como francês,
+    espanhol ou alemão. Versões antigas do google-genai não têm o campo
+    language_codes; nesse caso volta para a detecção automática ({})."""
+    if not TRANSCRIPTION_LANGUAGES:
+        return {}
+    try:
+        return types.AudioTranscriptionConfig(
+            language_codes=list(TRANSCRIPTION_LANGUAGES))
+    except Exception as e:
+        print(f"[JARVIS] Idioma da transcrição não suportado nesta versão "
+              f"do google-genai ({e.__class__.__name__}) — usando detecção automática")
+        return {}
+
+
 def _leaf_text(exc: BaseException) -> str:
     """Mensagens das exceções reais, desembrulhando o grupo do TaskGroup.
 
@@ -1080,7 +1101,7 @@ class JarvisLive:
         cfg = dict(
             response_modalities=["AUDIO"],
             output_audio_transcription={},
-            input_audio_transcription={},
+            input_audio_transcription=_input_transcription_config(),
             system_instruction="\n".join(parts),
             tools=[{"function_declarations": _all_decls}],
             # Asks the server to issue session-resumption handles. Enabled but
