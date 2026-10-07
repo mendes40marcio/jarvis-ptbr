@@ -24,10 +24,10 @@ from pathlib import Path
 INTRO_ENABLED = True
 MUSIC_DIR     = Path(__file__).resolve().parent.parent / "music"
 PREFERRED     = "back_in_black"   # nome do arquivo preferido (sem extensão)
-VOLUME        = 45                # volume do mpv, 0–100 (curva cúbica: 50 já é baixo)
+VOLUME        = 40                # volume do mpv, 0–100 (curva cúbica: 50 já é baixo)
 FADE_IN       = 2.0               # segundos para a música entrar
 FADE_OUT      = 4.0               # segundos para a música sumir
-LEAD_SECONDS  = 7                 # segundos de música sozinha antes da saudação
+LEAD_SECONDS  = 10                 # segundos de música sozinha antes da saudação
 LEAD_VOLUME   = 75                # volume da música enquanto ela está sozinha
 MAX_SECONDS   = 150               # trava de segurança: nunca toca mais que isso
 
