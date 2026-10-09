@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -85,7 +88,37 @@ def _compress(img_bytes: bytes, source_format: str = "PNG") -> tuple[bytes, str]
         return img_bytes, f"image/{source_format.lower()}"
 
 
+def _capture_screen_wayland() -> bytes | None:
+    """No Wayland o mss devolve tela preta. Pede a foto ao Ubuntu pelo portal
+    de captura (core/tela_portal.py, com o Python do sistema, que tem o gi)."""
+    script = Path(__file__).resolve().parent.parent / "core" / "tela_portal.py"
+    py = "/usr/bin/python3"
+    if not (script.exists() and Path(py).exists()):
+        return None
+    fd, tmp = tempfile.mkstemp(suffix=".png", prefix="jarvis_tela_")
+    os.close(fd)
+    try:
+        r = subprocess.run([py, "-I", str(script), tmp],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode == 0 and os.path.getsize(tmp) > 0:
+            return Path(tmp).read_bytes()
+        print(f"[Vision] ⚠️  Portal de captura falhou: {(r.stderr or r.stdout).strip()[-200:]}")
+    except Exception as e:
+        print(f"[Vision] ⚠️  Portal de captura falhou: {e}")
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return None
+
+
 def _capture_screen() -> tuple[bytes, str]:
+
+    if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE") == "wayland":
+        png = _capture_screen_wayland()
+        if png:
+            return _compress(png, "PNG")
 
     if not _MSS:
         raise RuntimeError("mss is not installed. Run: pip install mss")
