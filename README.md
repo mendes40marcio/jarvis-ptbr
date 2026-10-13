@@ -32,8 +32,8 @@ Sempre que possível, as melhorias são **plugins** (um arquivo em `plugins/`), 
 
 ```bash
 sudo apt install mpv python3-gi        # mpv: trilha de abertura | python3-gi: captura de tela no Wayland
-git clone https://github.com/mendes40marcio/<este-repositorio>.git
-cd <este-repositorio>
+git clone https://github.com/mendes40marcio/jarvis-ptbr.git
+cd jarvis-ptbr
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
