@@ -16,9 +16,26 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 # ── Cidade ───────────────────────────────────────────────────────────────────
-CITY = "Campina Grande do Sul"
-LAT, LON = -25.3058, -49.0550
-TIMEZONE = "America/Sao_Paulo"
+# Configurável em config/api_keys.json (que nunca vai para o GitHub):
+#   "briefing_city": "Sua Cidade"
+# Opcional, para fixar à mão: "briefing_lat", "briefing_lon", "briefing_timezone".
+# Sem cidade, a abertura segue normal, só sem o clima.
+def _load_city_config() -> dict:
+    import os
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "config", "api_keys.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+_CFG = _load_city_config()
+CITY = str(_CFG.get("briefing_city") or "").strip()
+LAT = _CFG.get("briefing_lat")
+LON = _CFG.get("briefing_lon")
+TIMEZONE = str(_CFG.get("briefing_timezone") or "America/Sao_Paulo")
 
 # ── Feeds do mercado gamer ───────────────────────────────────────────────────
 # Tentados em ordem; um feed fora do ar é só pulado. Pode trocar ou adicionar.
@@ -56,8 +73,33 @@ def _get(url: str) -> bytes:
         return r.read()
 
 
+def _geocode(city: str):
+    """Latitude, longitude e fuso da cidade (Open-Meteo, grátis, sem chave)."""
+    url = ("https://geocoding-api.open-meteo.com/v1/search?"
+           + urllib.parse.urlencode({"name": city, "count": 1,
+                                     "language": "pt", "format": "json"}))
+    try:
+        res = (json.loads(_get(url)).get("results") or [None])[0]
+    except Exception:
+        res = None
+    if not res:
+        return None, None, None
+    return res.get("latitude"), res.get("longitude"), res.get("timezone")
+
+
 def fetch_weather() -> str:
     """Uma linha com o clima de hoje na cidade. Retorna "" se falhar."""
+    global LAT, LON, TIMEZONE
+    if not CITY:
+        return ""
+    if LAT is None or LON is None:
+        lat, lon, tz = _geocode(CITY)
+        if lat is None:
+            print(f"[Briefing] Cidade não encontrada: {CITY}")
+            return ""
+        LAT, LON = lat, lon
+        if tz and "briefing_timezone" not in _CFG:
+            TIMEZONE = tz
     params = {
         "latitude": LAT, "longitude": LON, "timezone": TIMEZONE,
         "forecast_days": 1,
