@@ -50,3 +50,6 @@ downloads/
 screenshots/
 config/api_keys.json
 music/
+
+# Arquivos enviados pelo celular
+uploads/
